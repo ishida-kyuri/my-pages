@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<html lang="ja">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+        <meta name="mobile-web-app-capable" content="yes">
+        <title>給料計算ツール</title>
+        <script src="https://cdn.tailwindcss.com"></script>
+        <style>
+            *{box-sizing:border-box;font-family:"Noto Sans JP","Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif;-webkit-tap-highlight-color:transparent}
+            body{margin:0;background:#fff;color:#0f172a;overscroll-behavior-y:contain}
+            .tabular-nums{font-variant-numeric:tabular-nums}
+            .panel-anim{transition:transform .5s ease-out,opacity .5s ease-in-out}
+            .panel-open{transform:translateY(0);opacity:1;pointer-events:auto}
+            .panel-entering{transform:translateY(-28px);opacity:0;pointer-events:none}
+            .panel-closing{transform:translateY(0);opacity:0;pointer-events:none}
+            .backdrop-anim{transition:opacity .5s ease-in-out}
+            .slim-scroll::-webkit-scrollbar{width:4px}
+            .slim-scroll::-webkit-scrollbar-thumb{background:#cbd5e1;border-radius:9999px}
+
+            body{margin:0;background:#fff;color:#0f172a;overscroll-behavior-y:contain}
+            .swipe-area{touch-action:pan-y}
+        </style>
+    </head>
+    <body class="bg-white text-slate-900 select-none">
+        <div id="app" class="max-w-md mx-auto min-h-screen bg-white relative flex flex-col pb-40"></div>
+        <script>
+            const STORAGE_KEY="shift_calc_10th_ok";
+            const nthW=(y,m,w,n)=>1+((w-new Date(y,m-1,1).getDay()+7)%7)+(n-1)*7;
+            const vEq=y=>Math.floor(20.8431+.242194*(y-1980)-Math.floor((y-1980)/4));
+            const aEq=y=>Math.floor(23.2488+.242194*(y-1980)-Math.floor((y-1980)/4));
+            const iso=(y,m,d)=>`${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+
+            const now = new Date();
+            const tY = now.getFullYear();
+            const tM = now.getMonth() + 1;
+            const tD = now.getDate();
+            const todayIso = iso(tY, tM, tD);
+
+            function getInitialPeriod(closingDay = 10){
+                const cd = normalizeClosingDay(closingDay);
+                const dim = new Date(tY, tM, 0).getDate();
+                const effCd = cd === 0 ? dim : Math.min(cd, dim);
+                let m = tD >= effCd + 1 ? tM + 1 : tM;
+                let y = tY;
+                if (m > 12) {
+                    m = 1;
+                    y += 1;
+                }
+                return { year: y, month: m };
+            }
+
+            function normalizeClosingDay(v){
+                if (v === 0 || v === "0" || v === "end") return 0;
+                const n = parseInt(v, 10);
+                if (isNaN(n) || n < 1 || n > 28) return 10;
+                return n;
+            }
+
+            function normalizeStepMin(v){
+                const n = parseInt(v, 10);
+                if ([1, 5, 10, 15, 30].includes(n)) return n;
+                if (!isNaN(n) && n >= 1 && n <= 60) return n;
+                return 10;
+            }
+
+            const DEF = {
+                year: tY,
+                month: tM,
+                closingDay: 10,
+                stepMin: 10,
+                rates: { weekday: 1220, holiday: 1320, special: 1420 },
+                specialRanges: [],
+                entries: {},
+                periodManuals: {},
+                rateMode: "auto",
+                fixedRate: 4.8,
+                deductions: [{ id: "d1", name: "差引項目A", amount: 0 }]
+            };
+
+            const hCache={};
+
+            function isHol(y,m,d){
+                if(!hCache[y]){
+                    const s=new Set("1-1,2-11,2-23,4-29,5-3,5-4,5-5,8-11,11-3,11-23".split(",").map(x=>{const p=x.split("-");return iso(y,+p.at(0),+p.at(1));}));
+                    s.add(iso(y,1,nthW(y,1,1,2)));s.add(iso(y,3,vEq(y)));s.add(iso(y,7,nthW(y,7,1,3)));
+                    s.add(iso(y,9,nthW(y,9,1,3)));s.add(iso(y,9,aEq(y)));s.add(iso(y,10,nthW(y,10,1,2)));
+                    const f=new Set(s);
+                    s.forEach(k=>{const p=k.split("-").map(Number);if(new Date(p.at(0),p.at(1)-1,p.at(2)).getDay()===0){let n=new Date(p.at(0),p.at(1)-1,p.at(2)+1);while(f.has(iso(n.getFullYear(),n.getMonth()+1,n.getDate())))n.setDate(n.getDate()+1);f.add(iso(n.getFullYear(),n.getMonth()+1,n.getDate()));}});
+                    for(let mm=1;mm<=12;mm++){const dm=new Date(y,mm,0).getDate();for(let dd=1;dd<=dm;dd++){const c=iso(y,mm,dd);if(!f.has(c)){const p=new Date(y,mm-1,dd-1),n=new Date(y,mm-1,dd+1);if(f.has(iso(p.getFullYear(),p.getMonth()+1,p.getDate()))&&f.has(iso(n.getFullYear(),n.getMonth()+1,n.getDate())))f.add(c);}}}
+                    hCache[y]=f;
+                }
+                return hCache[y].has(iso(y,m,d));
+            }
+
+            function dayInfo(y,m,d,ent,rs){
+                const dow=new Date(y,m-1,d).getDay(),hol=isHol(y,m,d),md=m*100+d;
+                const sp=rs.some(r=>{const s=+r.startMonth*100+ +r.startDay,e=+r.endMonth*100+ +r.endDay;return s&&e&&(s<=e?md>=s&&md<=e:md>=s||md<=e);});
+                const auto=sp?"special":(dow===0||dow===6||hol)?"holiday":"weekday";
+                const app=ent&&ent.overrideType?ent.overrideType:auto;
+                return{dow,hol,app,spBadge:app==="special",holBadge:hol&&app!=="special"};
+            }
+
+            function toMin(s){if(!s)return null;const m=s.trim().match(/^(\d{1,2}):(\d{2})$/);if(!m)return null;const h=+m.at(1),mm=+m.at(2);return(h>=0&&h<=29&&mm>=0&&mm<=59)?h*60+mm:null;}
+
+            function normTime(r){
+                if(!r)return"";const s=r.trim().replace(/[：．.]/g,":");
+                if(s.includes(":")){const p=s.split(":").map(Number);return(!isNaN(p.at(0))&&!isNaN(p.at(1))&&p.at(0)>=0&&p.at(0)<=29&&p.at(1)>=0&&p.at(1)<=59)?`${p.at(0)}:${String(p.at(1)).padStart(2,"0")}`:"";}
+                const g=s.replace(/\D/g,"");
+                if(g.length===3){const h=+g.at(0),m=+g.slice(1);return m<=59?`${h}:${String(m).padStart(2,"0")}`:"";}
+                if(g.length===4){const h=+g.slice(0,2),m=+g.slice(2);return(h<=29&&m<=59)?`${h}:${String(m).padStart(2,"0")}`:"";}
+                return"";
+            }
+
+            const fmtM=m=>`${Math.floor(Math.max(0,m)/60)}:${String(Math.max(0,m)%60).padStart(2,"0")}`;
+
+            function parseDurMin(raw){
+                if(raw===undefined||raw===null)return 0;
+                const s=String(raw).trim().replace(/[：．.]/g,":");
+                if(!s)return 0;
+                if(s.includes(":")){
+                    const p=s.split(":").map(Number);
+                    if(!isNaN(p[0])&&!isNaN(p[1])&&p[0]>=0&&p[1]>=0&&p[1]<=59)return p[0]*60+p[1];
+                    return 0;
+                }
+                const n=parseInt(s.replace(/\D/g,""),10);
+                return isNaN(n)?0:Math.max(0,n);
+            }
+
+            function calcDay(ent,rate,stepMin=10){
+                if(!ent||!ent.start||!ent.end)return{valid:false,workMin:0,overMin:0,nightMin:0,amount:0};
+                const st=toMin(ent.start);let en=toMin(ent.end);if(st===null||en===null)return{valid:false,workMin:0,overMin:0,nightMin:0,amount:0};
+                if(en<=st)en+=1440;
+                const step=normalizeStepMin(stepMin);
+                const span=en-st,brk=Math.max(0,+ent.breakMin||0),work=Math.floor(Math.max(0,span-brk)/step)*step;
+                if(work<=0)return{valid:false,workMin:0,overMin:0,nightMin:0,amount:0};
+                let rn=0;"0-300,1320-1740,2760-3180".split(",").forEach(t=>{const b=t.split("-").map(Number),x=Math.max(st,b.at(0)),z=Math.min(en,b.at(1));if(z>x)rn+=z-x;});
+                const rd=Math.max(0,span-rn),nMin=Math.min(work,Math.floor(Math.max(0,rn-Math.max(0,brk-rd))/step)*step),oMin=Math.max(0,work-480);
+                const amt=Math.ceil(Number(((work/60)*rate+(oMin/60)*rate*.25+(nMin/60)*rate*.25).toFixed(6)));
+                return{valid:true,workMin:work,overMin:oMin,nightMin:nMin,amount:amt};
+            }
+
+            function calcAuto(b){
+                if(b<=0)return 0;if(b>=76000&&b<77000)return 2436;if(b<111000)return Math.floor(b*.03063);
+                let res=4000;"111000:4000,113000:4100,117000:4200,121000:4300,123000:4400,125000:5100,127000:5300,129000:5500,131000:5700,133000:5900,135000:6200,137000:6500,139000:6800,141000:7000,143000:7400,145000:7700,147000:8000,149000:8300,151000:8600,153000:8900,155000:9200,157000:9500,159000:9800,161000:10100,163000:10400,165000:10700,167000:11000,169000:11300".split(",").forEach(s=>{const p=s.split(":");if(b>=+p.at(0))res=+p.at(1);});
+                if(b<=170999)return res;return b<=199999?11600+Math.floor((b-171000)/2000)*350:Math.floor(b*.1021);
+            }
+
+            function pDates(y,m,closingDay=10){
+                const cd=normalizeClosingDay(closingDay);
+                const py=m===1?y-1:y,pm=m===1?12:m-1;
+                const prevDim=new Date(py,pm,0).getDate();
+                const curDim=new Date(y,m,0).getDate();
+                const endD=cd===0?curDim:Math.min(cd,curDim);
+                const startD=cd===0?1:Math.min(cd+1,prevDim);
+                const a=[];
+                if(cd!==0){
+                    for(let d=startD;d<=prevDim;d++)a.push({y:py,m:pm,d,iso:iso(py,pm,d)});
+                }
+                for(let d=1;d<=endD;d++)a.push({y,m,d,iso:iso(y,m,d)});
+                return a;
+            }
+
+            function periodKeyOfIso(dateIso,closingDay=10){
+                const p=dateIso.split("-").map(Number);
+                const dy=p.at(0),dm=p.at(1),dd=p.at(2);
+                const cd=normalizeClosingDay(closingDay);
+                if(cd===0)return `${dy}-${dm}`;
+                const dim=new Date(dy,dm,0).getDate();
+                const effCd=Math.min(cd,dim);
+                let py=dy,pm=dm;
+                if(dd>=effCd+1){
+                    pm++;
+                    if(pm>12){pm=1;py++;}
+                }
+                return `${py}-${pm}`;
+            }
+
+            function sumPeriod(y, m, st) {
+                const cd = normalizeClosingDay(st.closingDay);
+                const step = normalizeStepMin(st.stepMin);
+                const dates = pDates(y, m, cd), cats = { weekday: { l: "平日", c: 0, w: 0, o: 0, n: 0, t: 0 }, holiday: { l: "土日祝", c: 0, w: 0, o: 0, n: 0, t: 0 }, special: { l: "特異日", c: 0, w: 0, o: 0, n: 0, t: 0 } };
+                dates.forEach(it => { const e = st.entries[it.iso], inf = dayInfo(it.y, it.m, it.d, e, st.specialRanges), dm = calcDay(e, +st.rates[inf.app] || 0, step); if (dm.valid) { const c = cats[inf.app]; c.c++; c.w += dm.workMin; c.o += dm.overMin; c.n += dm.nightMin; } });
+                const pm = (st.periodManuals && st.periodManuals[`${y}-${m}`]) || null;
+                let mDays = 0;
+                if (pm) {
+                    mDays = Math.max(0, parseInt(pm.days, 10) || 0);
+                    ["weekday", "holiday", "special"].forEach(k => {
+                        if (pm[k]) {
+                            cats[k].w += Math.max(0, +pm[k].w || 0);
+                            cats[k].o += Math.max(0, +pm[k].o || 0);
+                            cats[k].n += Math.max(0, +pm[k].n || 0);
+                        }
+                    });
+                }
+                "weekday,holiday,special".split(",").forEach(k => {
+                    const c = cats[k], r = +st.rates[k] || 0;
+                    const baseAmt = Math.ceil(Number(((c.w / 60) * r).toFixed(6)));
+                    const overAmt = Math.ceil(Number(((c.o / 60) * r * 1.25).toFixed(6)));
+                    const nightAmt = Math.ceil(Number(((c.n / 60) * r * 1.25).toFixed(6)));
+                    c.t = (c.w + c.o + c.n) > 0 ? (baseAmt + overAmt + nightAmt) : 0;
+                });
+                const tc = cats.weekday.c + cats.holiday.c + cats.special.c + mDays, tw = cats.weekday.w + cats.holiday.w + cats.special.w, to = cats.weekday.o + cats.holiday.o + cats.special.o, tn = cats.weekday.n + cats.holiday.n + cats.special.n, pre = cats.weekday.t + cats.holiday.t + cats.special.t;
+                const cDed = st.deductions.reduce((s, d) => s + Math.max(0, +d.amount || 0), 0), base = Math.max(0, pre - cDed);
+                let rDed = 0, pct = 0;
+                if (st.rateMode === "auto") { rDed = calcAuto(base); pct = base > 0 ? (rDed / base) * 100 : 0; } else { pct = Math.max(0, +st.fixedRate || 0); rDed = Math.floor(base * (pct / 100)); }
+                const tDed = cDed + rDed, post = Math.max(0, pre - tDed);
+                return { dates, cats, tc, tw, to, tn, pre, cDed, base, rDed, pct, tDed, post };
+            }
+
+            function calcRecords(st){
+                const cd = normalizeClosingDay(st.closingDay);
+                const ks=new Set();
+                Object.entries(st.entries).forEach(([k,e])=>{
+                    if(!e||!e.start||!e.end)return;
+                    ks.add(periodKeyOfIso(k, cd));
+                });
+                if(st.periodManuals){
+                    Object.entries(st.periodManuals).forEach(([pk,pm])=>{
+                        if(!pm)return;
+                        const hasVal=(+pm.days||0)>0||["weekday","holiday","special"].some(k=>pm[k]&&((+pm[k].w||0)>0||(+pm[k].o||0)>0||(+pm[k].n||0)>0));
+                        if(hasVal)ks.add(pk);
+                    });
+                }
+                let cumPre=0, cumPost=0, cumDays=0, cumWork=0;
+                ks.forEach(p=>{
+                    const q=p.split("-").map(Number),s=sumPeriod(q.at(0),q.at(1),st);
+                    cumPre+=s.pre;
+                    cumPost+=s.post;
+                    cumDays+=s.tc;
+                    cumWork+=s.tw;
+                });
+                return{cumPre,cumPost,cumDays,cumWork};
+            }
+
+            function normalizeState(raw){
+                const baseDef = JSON.parse(JSON.stringify(DEF));
+                if(!raw || typeof raw !== "object") return baseDef;
+                const closingDay = normalizeClosingDay(raw.closingDay);
+                const stepMin = normalizeStepMin(raw.stepMin);
+                return {
+                    ...baseDef,
+                    ...raw,
+                    closingDay,
+                    stepMin,
+                    rates: { ...baseDef.rates, ...(raw.rates || {}) },
+                    specialRanges: Array.isArray(raw.specialRanges) ? raw.specialRanges : [],
+                    entries: raw.entries && typeof raw.entries === "object" ? raw.entries : {},
+                    periodManuals: raw.periodManuals && typeof raw.periodManuals === "object" ? raw.periodManuals : {},
+                    deductions: Array.isArray(raw.deductions) && raw.deductions.length ? raw.deductions : baseDef.deductions
+                };
+            }
+
+            let appState=(()=>{try{const r=localStorage.getItem(STORAGE_KEY);if(!r)return JSON.parse(JSON.stringify(DEF));return normalizeState(JSON.parse(r));}catch(e){return JSON.parse(JSON.stringify(DEF));}})();
+
+            const save=()=>{try{localStorage.setItem(STORAGE_KEY,JSON.stringify(appState));}catch(e){}};
+            const note=(m,center=false)=>{toast={msg:m,center};render();clearTimeout(tTimer);tTimer=setTimeout(()=>{toast=null;render();},2200);};
+            const fixSel=()=>{const ds=pDates(appState.year,appState.month,appState.closingDay);if(!ds.some(d=>d.iso===selIso))selIso=ds.at(0).iso;};
+
+            let selIso = todayIso, actPanel = null, pPhase = "closed", pTimer = null, openDD = null, spF = { sm: "", sd: "", em: "", ed: "", id: null }, bkTxt = "", restoreJsonInput = "", toast = null, tTimer = null, confirmModal = null;
+            let openManual = false;
+
+            const initPeriod = getInitialPeriod(appState.closingDay);
+            appState.year = initPeriod.year;
+            appState.month = initPeriod.month;
+            fixSel();
+            if (pDates(appState.year, appState.month, appState.closingDay).some(d => d.iso === todayIso)) {
+                selIso = todayIso;
+            }
+
+            async function copyJsonToClipboard(jsonStr){
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    await navigator.clipboard.writeText(jsonStr);
+                    return true;
+                }
+                const ta = document.createElement("textarea");
+                ta.value = jsonStr;
+                ta.setAttribute("readonly", "");
+                ta.style.position = "fixed";
+                ta.style.opacity = "0";
+                document.body.appendChild(ta);
+                ta.select();
+                const ok = document.execCommand("copy");
+                document.body.removeChild(ta);
+                return ok;
+            }
+
+            async function triggerSave(){
+                save();
+                const jsonStr = JSON.stringify(appState);
+                bkTxt = jsonStr;
+                try {
+                    await copyJsonToClipboard(jsonStr);
+                    note("JSONデータがクリップボードに保存されました", true);
+                } catch (e) {
+                    render();
+                    note("JSONデータがクリップボードに保存されました", true);
+                }
+            }
+
+            function executeRestore(rawJson){
+                const trimmed = (rawJson || "").trim();
+                if (!trimmed) {
+                    note("JSONデータを貼り付けてください");
+                    return;
+                }
+                try {
+                    const parsed = JSON.parse(trimmed);
+                    appState = normalizeState(parsed);
+                    save();
+                    restoreJsonInput = "";
+                    bkTxt = trimmed;
+                    fixSel();
+                    render();
+                    note("復元しました");
+                } catch (e) {
+                    note("JSONデータが正しくありません");
+                }
+            }
+
+            function executeReset(){
+                appState = JSON.parse(JSON.stringify(DEF));
+                const pInit = getInitialPeriod(appState.closingDay);
+                appState.year = pInit.year;
+                appState.month = pInit.month;
+                bkTxt = "";
+                restoreJsonInput = "";
+                spF = { sm: "", sd: "", em: "", ed: "", id: null };
+                try {
+                    localStorage.setItem(STORAGE_KEY, JSON.stringify(appState));
+                } catch (e) {}
+                fixSel();
+                if (pDates(appState.year, appState.month, appState.closingDay).some(d => d.iso === todayIso)) {
+                    selIso = todayIso;
+                }
+                render();
+                note("初期化しました");
+            }
+
+            function openConfirm(options){
+                confirmModal = {
+                    message: options.message,
+                    onConfirm: options.onConfirm,
+                    isDanger: Boolean(options.isDanger),
+                    withJsonInput: Boolean(options.withJsonInput),
+                    confirmLabel: options.confirmLabel || "実行する"
+                };
+                render();
+            }
+
+            function closeConfirm(){
+                confirmModal = null;
+                render();
+            }
+
+            const chgM=dm=>{let m=appState.month+dm,y=appState.year;if(m<1){m=12;y--;}else if(m>12){m=1;y++;}appState.year=y;appState.month=m;fixSel();openDD=null;save();render();};
+            const chgY=dy=>{appState.year+=dy;fixSel();openDD=null;save();render();};
+
+            let panelEls = null;
+
+            function ensurePanelEls() {
+                const root = document.getElementById("app");
+                if (!root) return null;
+                if (!panelEls || !root.contains(panelEls.bd)) {
+                    const bd = el("div", "fixed inset-0 top-[49px] z-20 bg-slate-900/45 backdrop-anim opacity-0 pointer-events-none");
+                    bd.onclick = clsPanel;
+                    const pw = el("div", "fixed left-0 right-0 top-[49px] z-30 max-w-md mx-auto px-2.5 pt-1.5 pointer-events-none");
+                    const pc = el("div", "bg-white rounded-2xl shadow-xl border border-slate-200/90 p-3.5 panel-anim panel-entering");
+                    pw.append(pc);
+                    panelEls = { bd, pw, pc };
+                }
+                return panelEls;
+            }
+
+            function syncPanelDOM(sum, rec = calcRecords(appState)) {
+                const els = ensurePanelEls();
+                if (!els) return;
+                const { bd, pw, pc } = els;
+                if (!bd.parentElement) document.getElementById("app").append(bd, pw);
+
+                const active = Boolean(actPanel && pPhase !== "closed");
+                if (actPanel && pPhase !== "closed") {
+                    pc.innerHTML = "";
+                    pc.append(buildPanel(sum, rec));
+                }
+
+                if (!active) {
+                    bd.className = "fixed inset-0 top-[49px] z-20 bg-slate-900/45 backdrop-anim opacity-0 pointer-events-none";
+                    pc.className = "bg-white rounded-2xl shadow-xl border border-slate-200/90 p-3.5 panel-anim panel-entering";
+                    return;
+                }
+
+                const isOpen = pPhase === "open";
+                bd.className = `fixed inset-0 top-[49px] z-20 bg-slate-900/45 backdrop-anim ${isOpen ? "opacity-100 pointer-events-auto" : "opacity-0 pointer-events-none"}`;
+                pc.className = `bg-white rounded-2xl shadow-xl border border-slate-200/90 p-3.5 panel-anim ${isOpen ? "panel-open" : pPhase === "entering" ? "panel-entering" : "panel-closing"}`;
+            }
+
+            function togPanel(t) {
+                clearTimeout(pTimer);
+                openDD = null;
+                if (actPanel === t && (pPhase === "open" || pPhase === "entering")) {
+                    clsPanel();
+                    return;
+                }
+                actPanel = t;
+                pPhase = "entering";
+                render();
+                requestAnimationFrame(() => requestAnimationFrame(() => {
+                    if (actPanel === t && pPhase === "entering") {
+                        pPhase = "open";
+                        syncPanelDOM(sumPeriod(appState.year, appState.month, appState));
+                        renderHeaderButtons();
+                    }
+                }));
+            }
+
+            function clsPanel() {
+                if (!actPanel || pPhase === "closing" || pPhase === "closed") return;
+                pPhase = "closing";
+                syncPanelDOM(sumPeriod(appState.year, appState.month, appState));
+                renderHeaderButtons();
+                pTimer = setTimeout(() => {
+                    actPanel = null;
+                    pPhase = "closed";
+                    syncPanelDOM(sumPeriod(appState.year, appState.month, appState));
+                }, 900);
+            }
+
+            const updEnt=p=>{appState.entries[selIso]={...(appState.entries[selIso]||{start:"",end:"",breakMin:60,overrideType:null}),...p};save();render();};
+            document.addEventListener("pointerdown",e=>{if(openDD&&!e.target.closest("[data-dd]")){openDD=null;render();}});
+            const el=(tag,cls="",txt="",at={})=>{const d=document.createElement(tag);if(cls)d.className=cls;if(txt!=="")d.textContent=txt;Object.entries(at).forEach(([k,v])=>d.setAttribute(k,v));return d;};
+            function buildTimeDD(t,cur){
+                const step = normalizeStepMin(appState.stepMin);
+                const p=cur.split(":"),ch=p.length===2?+p.at(0):9,cm=p.length===2?+p.at(1):0;
+                const wrap=el("div","absolute top-full left-0 right-0 w-full mt-1 z-40 bg-white border border-slate-200 rounded-xl shadow-lg overflow-hidden box-border");
+                const hd=el("div","grid grid-cols-2 bg-slate-50 border-b border-slate-200 text-[10px] font-bold text-slate-500 text-center py-1");
+                hd.append(el("div","","時"),el("div","","分"));
+                const body=el("div","grid grid-cols-2 h-36"),colH=el("div","overflow-y-auto slim-scroll border-r border-slate-100"),colM=el("div","overflow-y-auto slim-scroll");
+                for(let h=0;h<24;h++){
+                    const b=el("button",`w-full py-1 text-center text-[11px] font-bold tabular-nums ${h===ch?"bg-blue-600 text-white":"text-slate-700 hover:bg-slate-100"}`,String(h).padStart(2,"0"),{type:"button"});
+                    b.onclick=()=>{const curE=appState.entries[selIso]||{start:"",end:"",breakMin:60,overrideType:null};const cs=curE[t]||(t==="start"?"9:00":"18:00");const m=cs.includes(":")?+cs.split(":").at(1):0;updEnt({[t]:`${h}:${String(m).padStart(2,"0")}`});};
+                    colH.append(b);
+                }
+                const mStep = step === 1 ? 5 : step;
+                for(let m=0;m<60;m+=mStep){
+                    const b=el("button",`w-full py-1 text-center text-[11px] font-bold tabular-nums ${m===cm?"bg-blue-600 text-white":"text-slate-700 hover:bg-slate-100"}`,String(m).padStart(2,"0"),{type:"button"});
+                    b.onclick=()=>{const curE=appState.entries[selIso]||{start:"",end:"",breakMin:60,overrideType:null};const cs=curE[t]||(t==="start"?"9:00":"18:00");const h=cs.includes(":")?+cs.split(":").at(0):9;updEnt({[t]:`${h}:${String(m).padStart(2,"0")}`});};
+                    colM.append(b);
+                }
+                body.append(colH,colM);wrap.append(hd,body);return wrap;
+            }
+
+            function buildPanel(sum){
+                const rec = calcRecords(appState);
+                const box=el("div","flex flex-col gap-2.5"),top=el("div","flex items-center justify-between");
+                top.append(el("h2","text-sm font-bold text-slate-900",actPanel==="rates"?"¥":actPanel==="percent"?"調整率・差引項目":"内訳"),el("button","w-6 h-6 rounded-full bg-slate-100 text-slate-500 text-xs font-bold","×",{type:"button"}));
+                top.lastChild.onclick=clsPanel;box.append(top);
+                if(actPanel==="rates"){
+                    const g=el("div","grid grid-cols-3 gap-2");
+                    [["weekday","平日","border-l-slate-400","text-slate-600"],["holiday","土日祝","border-l-blue-500","text-blue-600"],["special","特異日","border-l-purple-500","text-purple-600"]].forEach(([k,l,b,c])=>{
+                        const card=el("div",`bg-slate-50 border border-slate-200 border-l-4 ${b} rounded-xl p-2`),inp=el("input","w-full text-right text-xs font-bold tabular-nums bg-transparent outline-none","",{type:"text",inputmode:"numeric",value:appState.rates[k]});
+                        inp.onfocus=e=>e.target.select();inp.onchange=e=>{appState.rates[k]=Math.max(0,parseInt(e.target.value.replace(/\D/g,""),10)||0);save();render();};
+                        card.append(el("div",`text-[10px] font-bold ${c} mb-1`,l),inp);g.append(card);
+                    });
+                    box.append(g);
+
+                    const ruleB = el("div", "bg-slate-50/90 border border-slate-200/80 rounded-xl p-2.5 flex flex-col gap-2");
+                    ruleB.append(el("div", "text-xs font-bold text-slate-700", "締め日・時間刻み設定"));
+                    const ruleG = el("div", "grid grid-cols-2 gap-2");
+
+                    const cdWrap = el("div", "bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 flex flex-col gap-1");
+                    cdWrap.append(el("label", "text-[10px] font-bold text-slate-500", "締め日"));
+                    const cdSel = el("select", "w-full text-xs font-bold text-slate-800 bg-transparent outline-none tabular-nums");
+                    const cdChoices = [10, 15, 20, 25, 0, ...Array.from({ length: 28 }, (_, i) => i + 1).filter(d => ![10, 15, 20, 25].includes(d))];
+                    const curCd = normalizeClosingDay(appState.closingDay);
+                    cdChoices.forEach(d => {
+                        const label = d === 0 ? "末日締め" : `${d}日締め`;
+                        const opt = el("option", "", label, { value: String(d) });
+                        if (d === curCd) opt.selected = true;
+                        cdSel.append(opt);
+                    });
+                    cdSel.onchange = e => {
+                        appState.closingDay = normalizeClosingDay(e.target.value);
+                        fixSel();
+                        save();
+                        render();
+                    };
+                    cdWrap.append(cdSel);
+
+                    const stWrap = el("div", "bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 flex flex-col gap-1");
+                    stWrap.append(el("label", "text-[10px] font-bold text-slate-500", "時間刻み"));
+                    const stSel = el("select", "w-full text-xs font-bold text-slate-800 bg-transparent outline-none tabular-nums");
+                    const stChoices = [1, 5, 10, 15, 30];
+                    const curStep = normalizeStepMin(appState.stepMin);
+                    stChoices.forEach(m => {
+                        const opt = el("option", "", `${m}分刻み`, { value: String(m) });
+                        if (m === curStep) opt.selected = true;
+                        stSel.append(opt);
+                    });
+                    stSel.onchange = e => {
+                        appState.stepMin = normalizeStepMin(e.target.value);
+                        save();
+                        render();
+                    };
+                    stWrap.append(stSel);
+
+                    ruleG.append(cdWrap, stWrap);
+                    ruleB.append(ruleG);
+                    box.append(ruleB);
+
+                    const spB=el("div","bg-slate-50/90 border border-slate-200/80 rounded-xl p-2.5 flex flex-col gap-1.5");
+                    spB.append(el("div","text-xs font-bold text-purple-600","特異日期間の設定"));
+                    const mkRow=(lbl,km,kd,maxD)=>{
+                        const r=el("div","bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 flex items-center gap-1.5 text-xs");
+                        const im=el("input","w-9 text-center font-bold tabular-nums bg-slate-100 rounded py-0.5 outline-none","",{type:"text",inputmode:"numeric",placeholder:"--",value:spF[km]});
+                        const id=el("input","w-9 text-center font-bold tabular-nums bg-slate-100 rounded py-0.5 outline-none","",{type:"text",inputmode:"numeric",placeholder:"--",value:spF[kd]});
+                        im.onfocus=id.onfocus=e=>e.target.select();
+                        im.oninput=e=>{let v=e.target.value.replace(/\D/g,"").slice(0,2);if(v!=="")v=String(Math.min(12,Math.max(1,+v)));spF[km]=e.target.value=v;updBtn();};
+                        id.oninput=e=>{let v=e.target.value.replace(/\D/g,"").slice(0,2);if(v!=="")v=String(Math.min(maxD,Math.max(1,+v)));spF[kd]=e.target.value=v;updBtn();};
+                        r.append(el("span","text-slate-500 font-bold",lbl),im,el("span","text-slate-500 font-bold","月"),id,el("span","text-slate-500 font-bold","日"));return r;
+                    };
+                    const addB=el("button","w-full py-1.5 rounded-lg text-xs font-bold","", {type:"button"});
+                    const updBtn=()=>{const ok=spF.sm&&spF.sd&&spF.em&&spF.ed;addB.disabled=!ok;addB.textContent=spF.id?"この期間を更新":"+ この期間を追加";addB.className=`w-full py-1.5 rounded-lg text-xs font-bold ${ok?"bg-purple-600 text-white":"bg-slate-200 text-slate-400"}`;};
+                    updBtn();addB.onclick=()=>{if(!(spF.sm&&spF.sd&&spF.em&&spF.ed))return;const obj={id:spF.id||"sp_"+Date.now(),startMonth:+spF.sm,startDay:+spF.sd,endMonth:+spF.em,endDay:+spF.ed};appState.specialRanges=spF.id?appState.specialRanges.map(r=>r.id===spF.id?obj:r):[...appState.specialRanges,obj];spF={sm:"",sd:"",em:"",ed:"",id:null};save();render();};
+                    spB.append(mkRow("開始:","sm","sd",31),mkRow("終了:","em","ed",31),addB);
+                    if(appState.specialRanges.length){
+                        const tgW=el("div","pt-1.5 border-t border-slate-200 flex flex-wrap gap-1.5");
+                        appState.specialRanges.forEach(r=>{
+                            const tg=el("div","inline-flex items-center gap-1 bg-purple-100 text-purple-900 border border-purple-200 rounded-lg px-2 py-0.5 text-[11px] font-bold tabular-nums");
+                            const eb=el("button","",`${r.startMonth}/${r.startDay} 〜 ${r.endMonth}/${r.endDay}`,{type:"button"});eb.onclick=()=>{spF={sm:String(r.startMonth),sd:String(r.startDay),em:String(r.endMonth),ed:String(r.endDay),id:r.id};render();};
+                            const db=el("button","text-purple-500 pl-0.5","×",{type:"button"});db.onclick=()=>{appState.specialRanges=appState.specialRanges.filter(x=>x.id!==r.id);if(spF.id===r.id)spF={sm:"",sd:"",em:"",ed:"",id:null};save();render();};
+                            tg.append(eb,db);tgW.append(tg);
+                        });spB.append(tgW);
+                    }
+                    const bk=el("div","bg-slate-50/90 border border-slate-200/80 rounded-xl p-2.5 flex flex-col gap-1.5"),br=el("div","flex gap-1.5");
+                    const bi=el("input","w-full text-[10px] bg-white border border-slate-200 rounded-lg px-2 py-1 outline-none","",{type:"text",placeholder:"JSONデータを貼り付けて復元",value:bkTxt});bi.oninput=e=>bkTxt=e.target.value;
+                    const bExp=el("button","flex-1 py-1.5 rounded-lg bg-slate-800 text-white text-[11px] font-bold","JSONをコピー",{type:"button"});bExp.onclick=async()=>{bkTxt=JSON.stringify(appState);try{await copyJsonToClipboard(bkTxt);note("JSONをコピーしました");}catch(e){render();note("下の欄にJSONを出力しました");}};
+                    const bImp=el("button","flex-1 py-1.5 rounded-lg bg-white border border-slate-300 text-slate-800 text-[11px] font-bold","貼り付けて復元",{type:"button"});bImp.onclick=()=>{executeRestore(bkTxt);};
+                    br.append(bExp,bImp);bk.append(el("div","text-[11px] font-bold text-slate-700","JSONバックアップ & 復元"),br,bi);box.append(spB,bk);
+                }
+                if(actPanel==="percent"){
+                    const tabs=el("div","grid grid-cols-2 bg-slate-100 p-1 rounded-xl text-xs font-bold");
+                    [["auto","対象額連動（自動）"],["fixed","固定率（%）"]].forEach(([m,l])=>{
+                        const b=el("button",`py-1.5 rounded-lg ${appState.rateMode===m?"bg-blue-600 text-white shadow-sm":"text-slate-600"}`,l,{type:"button"});
+                        b.onclick=()=>{appState.rateMode=m;save();render();};tabs.append(b);
+                    });
+                    const card=el("div","bg-slate-50 border border-slate-200/80 rounded-xl p-2.5 flex flex-col gap-2"),g=el("div","grid grid-cols-2 gap-2");
+                    const c1=el("div");c1.append(el("div","text-[10px] font-bold text-slate-500","基準対象額"),el("div","text-sm font-bold text-slate-900 tabular-nums",sum.base.toLocaleString()));
+                    const c2=el("div");c2.append(el("div","text-[10px] font-bold text-slate-500",appState.rateMode==="auto"?"適用率（実質）":"固定率（%）"));
+                    if(appState.rateMode==="auto"){c2.append(el("div","text-sm font-bold text-blue-600 tabular-nums",sum.pct.toFixed(2)+"%"));}
+                    else{const fi=el("input","w-20 text-sm font-bold text-blue-600 tabular-nums bg-white border border-slate-200 rounded px-1.5 py-0.5 outline-none","",{type:"text",inputmode:"decimal",value:appState.fixedRate});fi.onfocus=e=>e.target.select();fi.onchange=e=>{appState.fixedRate=Math.max(0,parseFloat(e.target.value)||0);save();render();};c2.append(fi);}
+                    g.append(c1,c2);
+
+                    const r2 = el("section", "grid grid-cols-2 gap-2");
+                    [["累計調整前合計", rec.cumPre.toLocaleString()], ["累計調整後合計", rec.cumPost.toLocaleString()]].forEach(([l, v]) => {
+                        const c = el("div", "bg-slate-50/90 border border-slate-200/80 rounded-xl px-3 py-1.5 flex items-center justify-between text-[11px] font-bold tabular-nums");
+                        c.append(el("span", "text-slate-500", l), el("span", "text-slate-900", v));
+                        r2.append(c);
+                    });
+                    const r3 = el("section", "grid grid-cols-2 gap-2");
+                    [["累計出勤日数", `${rec.cumDays}日`], ["累計出勤総時間", fmtM(rec.cumWork)]].forEach(([l, v]) => {
+                        const c = el("div", "bg-slate-50/90 border border-slate-200/80 rounded-xl px-3 py-1.5 flex items-center justify-between text-[11px] font-bold tabular-nums");
+                        c.append(el("span", "text-slate-500", l), el("span", "text-slate-900", v));
+                        r3.append(c);
+                    });
+
+                    card.append(g, r2, r3);
+                    const dBox=el("div","bg-slate-50 border border-slate-200/80 rounded-xl p-2.5 flex flex-col gap-1.5");dBox.append(el("div","text-[11px] font-bold text-slate-600","差引項目設定"));
+                    appState.deductions.forEach(d=>{
+                        const row=el("div","flex items-center gap-1.5");
+                        const ni=el("input","flex-1 min-w-0 bg-white border border-slate-200 rounded-lg px-2 py-1 text-xs font-bold outline-none","",{type:"text",value:d.name});ni.onchange=e=>{d.name=e.target.value||"差引項目";save();render();};
+                        const ai=el("input","w-20 bg-white border border-slate-200 rounded-lg px-2 py-1 text-right text-xs font-bold tabular-nums outline-none","",{type:"text",inputmode:"numeric",value:d.amount});ai.onfocus=e=>e.target.select();ai.onchange=e=>{d.amount=Math.max(0,parseInt(e.target.value.replace(/\D/g,""),10)||0);save();render();};
+                        const db=el("button","text-rose-500 px-1 text-xs font-bold","🗑",{type:"button"});db.onclick=()=>{appState.deductions=appState.deductions.filter(x=>x.id!==d.id);save();render();};
+                        row.append(ni,ai,db);dBox.append(row);
+                    });
+                    const addD=el("button","self-start text-[11px] font-bold text-blue-600 bg-blue-50 px-2.5 py-1 rounded-lg","+ 差引項目を追加",{type:"button"});addD.onclick=()=>{appState.deductions.push({id:"d_"+Date.now(),name:"差引項目",amount:0});save();render();};
+                    dBox.append(addD);box.append(tabs,card,dBox);
+                }
+                if(actPanel==="breakdown"){
+                    const tw=el("div","border border-slate-200/80 rounded-xl overflow-hidden"),tb=el("table","w-full table-fixed border-collapse text-slate-900 tabular-nums");
+                    const th=el("thead"),thr=el("tr","bg-slate-100 border-b border-slate-200 text-slate-600 font-bold");thr.style.fontSize="9.5px";
+                    [["区分","w-[14%] text-left px-1"],["内訳","w-[9%] text-center px-0.5"],["活動時間","w-[17%] text-right px-0.5"],["活動外時間","w-[18%] text-right px-0.5"],["夜間活動時間","w-[21%] text-right px-0.5"],["調整前合計","w-[21%] text-right px-1"]].forEach(([t,c])=>thr.append(el("th",`py-1.5 whitespace-nowrap ${c}`,t)));
+                    th.append(thr);const body=el("tbody");body.style.fontSize="10.5px";
+                    [sum.cats.weekday,sum.cats.holiday,sum.cats.special].forEach(r=>{
+                        const tr=el("tr","border-b border-slate-100");
+                        [[r.l,"text-left px-1 font-bold"],[r.c,"text-center px-0.5"],[fmtM(r.w),"text-right px-0.5"],[fmtM(r.o),"text-right px-0.5"],[fmtM(r.n),"text-right px-0.5"],[r.t.toLocaleString(),"text-right px-1 font-bold"]].forEach(([v,c])=>tr.append(el("td",`py-1.5 whitespace-nowrap ${c}`,String(v))));
+                        body.append(tr);
+                    });
+
+                    const ftr=el("tr","bg-slate-50 font-bold");
+                    [["全体合計","text-left px-1"],[sum.tc,"text-center px-0.5"],[fmtM(sum.tw),"text-right px-0.5"],[fmtM(sum.to),"text-right px-0.5"],[fmtM(sum.tn),"text-right px-0.5"],[sum.pre.toLocaleString(),"text-right px-1"]].forEach(([v,c])=>ftr.append(el("td",`py-1.5 whitespace-nowrap ${c}`,String(v))));
+                    body.append(ftr);tb.append(th,body);tw.append(tb);
+                    const sBox=el("div","bg-slate-50/90 border border-slate-200/80 rounded-xl p-2.5 flex flex-col gap-1 text-xs tabular-nums");
+                    const addL=(l,v,cls="text-slate-700",topB=false)=>{const r=el("div",`flex items-center justify-between ${cls} ${topB?"pt-1 mt-0.5 border-t border-slate-200/80":""}`);r.append(el("span","",l),el("span","font-bold",v));sBox.append(r);};
+                    addL("活動外時間計:",fmtM(sum.to),"text-slate-600");addL("夜間活動時間計:",fmtM(sum.tn),"text-slate-600");addL("調整前合計:",sum.pre.toLocaleString(),"text-slate-700",true);
+                    appState.deductions.filter(d=>+d.amount>0).forEach(d=>addL(`${d.name}:`, "-"+(+d.amount).toLocaleString(),"text-rose-600 font-medium"));
+                    addL("基準対象額:",sum.base.toLocaleString(),"text-slate-700");
+                    addL(`適用率 (${appState.rateMode==="auto"?`自動連動: ${sum.pct.toFixed(2)}%`:`固定: ${sum.pct.toFixed(1)}%`}):`,"-"+sum.rDed.toLocaleString(),"text-rose-600 font-medium");
+                    addL("調整後合計:",sum.post.toLocaleString(),"text-sm font-bold text-blue-600",true);
+                    box.append(tw,sBox);
+                }
+                return box;
+            }
+
+            function renderHeaderButtons() {
+                document.querySelectorAll("[data-panel-btn]").forEach(b => {
+                    const k = b.getAttribute("data-panel-btn");
+                    const on = actPanel === k && pPhase !== "closing" && pPhase !== "closed";
+                    b.className = b.className
+                        .replace(/\bbg-blue-600 text-white border-blue-600\b|\bbg-slate-100 text-slate-700 border-slate-200\/80\b/g, "")
+                        .trim() + (on ? " bg-blue-600 text-white border-blue-600" : " bg-slate-100 text-slate-700 border-slate-200/80");
+                });
+            }
+
+            function render() {
+                const root = document.getElementById("app");
+                root.innerHTML = "";
+                panelEls = null;
+                const sum = sumPeriod(appState.year, appState.month, appState), rec = calcRecords(appState);
+                const sp = selIso.split("-").map(Number), sY = sp.at(0), sM = sp.at(1), sD = sp.at(2);
+                const sEnt = appState.entries[selIso] || { start: "", end: "", breakMin: 60, overrideType: null };
+                const sInf = dayInfo(sY, sM, sD, sEnt, appState.specialRanges), sMet = calcDay(sEnt, +appState.rates[sInf.app] || 0, appState.stepMin);
+                const hd = el("header", "sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-slate-200/80 px-3 py-2.5 flex items-center justify-between");
+                const yB = el("div", "flex items-center gap-1 bg-slate-100 rounded-full px-1.5 py-0.5 border border-slate-200/70");
+                const py = el("button", "w-6 h-6 text-slate-600 text-xs font-bold", "<", { type: "button" }); py.onclick = () => chgY(-1);
+                const ny = el("button", "w-6 h-6 text-slate-600 text-xs font-bold", ">", { type: "button" }); ny.onclick = () => chgY(1);
+                yB.append(py, el("span", "text-xs font-bold tabular-nums px-1 text-slate-800", String(appState.year)), ny);
+                const mB = el("div", "flex items-center gap-2");
+                const pm = el("button", "w-7 h-7 rounded-full text-slate-600 hover:bg-slate-100 text-sm font-bold", "←", { type: "button" }); pm.onclick = () => chgM(-1);
+                const nm = el("button", "w-7 h-7 rounded-full text-slate-600 hover:bg-slate-100 text-sm font-bold", "→", { type: "button" }); nm.onclick = () => chgM(1);
+                mB.append(pm, el("span", "text-sm font-bold tabular-nums text-slate-900 min-w-[4.5rem] text-center", `${appState.month}月期`), nm);
+                const rB = el("div", "flex items-center gap-1.5");
+                [["rates", "¥", "w-8"], ["percent", "%", "w-8"], ["breakdown", "内訳", "px-2.5"]].forEach(([k, l, w]) => {
+                    const on = actPanel === k && pPhase !== "closing" && pPhase !== "closed";
+                    const b = el("button", `h-8 ${w} rounded-full text-xs font-bold border transition-colors ${on ? "bg-blue-600 text-white border-blue-600" : "bg-slate-100 text-slate-700 border-slate-200/80"}`, l, { type: "button", "data-panel-btn": k });
+                    b.onclick = () => togPanel(k); rB.append(b);
+                });
+                hd.append(yB, mB, rB); root.append(hd);
+
+                if (toast) {
+                    const toastCls = toast.center
+                        ? "fixed inset-0 z-50 flex items-center justify-center pointer-events-none px-4"
+                        : "fixed top-14 left-1/2 -translate-x-1/2 z-50";
+                    const tw = el("div", toastCls);
+                    const badgeCls = toast.center
+                        ? "bg-slate-900/95 text-white text-sm font-bold px-5 py-3 rounded-2xl shadow-xl text-center"
+                        : "bg-slate-900/90 text-white text-xs font-medium px-3.5 py-1.5 rounded-full shadow-md";
+                    tw.append(el("div", badgeCls, toast.msg));
+                    root.append(tw);
+                }
+                syncPanelDOM(sum);
+
+                const mn = el("main", "flex-1 px-2.5 pt-2.5 flex flex-col gap-2.5 swipe-area");
+                let tStart = null;
+                mn.addEventListener("touchstart", e => {
+                    if (e.touches.length === 1) tStart = { x: e.touches[0].clientX, y: e.touches[0].clientY };
+                }, { passive: true });
+                mn.addEventListener("touchend", e => {
+                    if (!tStart || e.changedTouches.length !== 1) return;
+                    const dx = e.changedTouches[0].clientX - tStart.x;
+                    const dy = e.changedTouches[0].clientY - tStart.y;
+                    tStart = null;
+                    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy) * 1.5) {
+                        chgM(dx < 0 ? 1 : -1);
+                    }
+                }, { passive: true });
+                const cal = el("section", "bg-slate-50/90 border border-slate-200/80 rounded-2xl p-2");
+
+                const wh = el("div", "grid grid-cols-7 gap-1.5 mb-1.5 text-center text-[11px] font-bold");
+                "日,月,火,水,木,金,土".split(",").forEach((w, i) => wh.append(el("div", i === 0 ? "text-rose-500" : i === 6 ? "text-sky-600" : "text-slate-600", w)));
+                const gr = el("div", "grid grid-cols-7 gap-1.5"), f0 = sum.dates.at(0), blanks = new Date(f0.y, f0.m - 1, f0.d).getDay();
+                for (let i = 0; i < blanks; i++) gr.append(el("div", "h-[54px]"));
+                sum.dates.forEach((dO, idx) => {
+                    const ent = appState.entries[dO.iso], inf = dayInfo(dO.y, dO.m, dO.d, ent, appState.specialRanges), dm = calcDay(ent, +appState.rates[inf.app] || 0, appState.stepMin), sel = dO.iso === selIso;
+                    const bg = sel ? "bg-sky-200/75 border-blue-400 ring-1 ring-blue-300/60" : inf.spBadge ? "bg-purple-50/85 border-purple-200/80" : (inf.dow === 0 || inf.hol) ? "bg-rose-50/85 border-rose-200/80" : inf.dow === 6 ? "bg-sky-50/85 border-sky-200/80" : "bg-white border-slate-200/90";
+                    const dc = sel ? "text-blue-950 font-bold" : (inf.dow === 0 || inf.hol) ? "text-rose-600" : inf.dow === 6 ? "text-sky-600" : "text-slate-700";
+                    const cell = el("button", `h-[54px] rounded-xl border p-1 flex flex-col justify-between text-left transition-colors ${bg}`, "", { type: "button" });
+                    cell.onclick = () => { selIso = dO.iso; openDD = null; if (!appState.entries[dO.iso]) { appState.entries[dO.iso] = { start: "", end: "", breakMin: 60, overrideType: null }; save(); } render(); };
+                    const topR = el("div", "w-full flex items-center justify-between leading-none");
+                    topR.append(el("span", `text-[10px] font-bold tabular-nums ${dc}`, (idx === 0 || dO.d === 1) ? `${dO.m}/${dO.d}` : String(dO.d)));
+                    if (inf.spBadge) topR.append(el("span", "text-[8px] font-bold leading-none px-1 py-0.5 rounded bg-purple-600 text-white", "特"));
+                    else if (inf.holBadge) topR.append(el("span", "text-[8px] font-bold leading-none px-1 py-0.5 rounded bg-rose-500 text-white", "祝"));
+                    const botR = el("div", "w-full text-center leading-tight");
+                    if (dm.valid) botR.append(el("div", `text-[8.5px] tabular-nums tracking-tighter truncate ${sel ? "text-blue-900 font-medium" : "text-slate-500"}`, `${ent.start}-${ent.end}`), el("div", `text-[10px] font-bold tabular-nums leading-tight ${sel ? "text-blue-800" : "text-slate-900"}`, dm.amount.toLocaleString()));
+                    else botR.append(el("div", "h-[20px]"));
+                    cell.append(topR, botR); gr.append(cell);
+                });
+                cal.append(wh, gr); mn.append(cal);
+
+                const form = el("section", "bg-slate-50/90 border border-slate-200/80 rounded-2xl p-3 flex flex-col gap-2.5");
+                const fTop = el("div", "flex items-center justify-between"), fL = el("div", "flex items-center gap-2");
+                const cLbl = sInf.app === "weekday" ? "平日" : sInf.app === "holiday" ? "土日祝" : "特異日";
+                fL.append(el("span", "text-sm font-bold text-slate-900 tabular-nums", `${sM}月${sD}日 (${"日月火水木金土".at(sInf.dow)})`), el("span", "text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-200/80 text-slate-700", cLbl));
+                fTop.append(fL);
+                if (sEnt.start || sEnt.end || sEnt.overrideType) { const cb = el("button", "text-xs font-bold text-rose-500", "× 消去", { type: "button" }); cb.onclick = () => { delete appState.entries[selIso]; openDD = null; save(); render(); }; fTop.append(cb); }
+                form.append(fTop);
+                const g3 = el("div", "grid grid-cols-3 gap-2");
+                [["start", "開始", "9:00"], ["end", "終了", "18:00"]].forEach(([k, l, defT]) => {
+                    const w = el("div", "relative w-full", "", { "data-dd": "1" }); w.append(el("label", "block text-[10px] font-bold text-slate-500 mb-1", l));
+                    const bx = el("div", "w-full h-9 bg-white border border-slate-200 rounded-xl pl-2 pr-0.5 flex items-center justify-between overflow-hidden");
+                    const inp = el("input", "w-full min-w-0 text-xs font-bold tabular-nums text-slate-900 bg-transparent outline-none", "", { type: "text", inputmode: "numeric", placeholder: "--:--", value: sEnt[k] || "" });
+                    inp.onfocus = e => e.target.select(); inp.onkeydown = e => { if (e.key === "Enter") e.target.blur(); };
+                    inp.onblur = e => { const v = e.target.value.trim(); if (!v) { updEnt({ [k]: "" }); return; } const n = normTime(v); n ? updEnt({ [k]: n }) : render(); };
+                    const ic = el("button", "h-full px-2 flex items-center justify-center text-slate-400 hover:text-slate-600 active:bg-slate-100 rounded-r-xl shrink-0 text-xs", "🕒", { type: "button" }); ic.onclick = () => { openDD = openDD === k ? null : k; render(); };
+                    bx.append(inp, ic); w.append(bx); if (openDD === k) w.append(buildTimeDD(k, sEnt[k] || defT)); g3.append(w);
+                });
+                const bw = el("div", "w-full"); bw.append(el("label", "block text-[10px] font-bold text-slate-500 mb-1", "休み"));
+                const bbx = el("div", "w-full h-9 bg-white border border-slate-200 rounded-xl px-2.5 flex items-center");
+                const binp = el("input", "w-full text-right text-xs font-bold tabular-nums text-slate-900 bg-transparent outline-none", "", { type: "text", inputmode: "numeric", value: sEnt.breakMin !== undefined ? sEnt.breakMin : 60 });
+                binp.onfocus = e => e.target.select(); binp.onchange = e => updEnt({ breakMin: Math.max(0, parseInt(e.target.value.replace(/\D/g, ""), 10) || 0) });
+                bbx.append(binp); bw.append(bbx); g3.append(bw); form.append(g3);
+                const cw = el("div", "relative w-full", "", { "data-dd": "1" }); cw.append(el("label", "block text-[10px] font-bold text-slate-500 mb-1", "適用区分"));
+                const bCol = sInf.app === "weekday" ? "border-l-slate-400" : sInf.app === "holiday" ? "border-l-blue-500" : "border-l-purple-500";
+                const cBtn = el("button", `w-full h-9 bg-white border border-slate-200 border-l-4 ${bCol} rounded-xl px-3 flex items-center justify-between text-xs font-bold text-slate-800 tabular-nums`, "", { type: "button" });
+                cBtn.append(el("span", "", `${cLbl} (${appState.rates[sInf.app]})`), el("span", "text-slate-400 text-[10px]", openDD === "cat" ? "▲" : "▼"));
+                cBtn.onclick = () => { openDD = openDD === "cat" ? null : "cat"; render(); }; cw.append(cBtn);
+                if (openDD === "cat") {
+                    const menu = el("div", "absolute top-full left-0 right-0 mt-1 z-40 bg-white border border-slate-200 rounded-xl shadow-lg overflow-hidden");
+                    [["weekday", "平日", "border-l-slate-400"], ["holiday", "土日祝", "border-l-blue-500"], ["special", "特異日", "border-l-purple-500"]].forEach(([k, l, bc]) => {
+                        const it = el("button", `w-full px-3 py-2 text-left text-xs font-bold text-slate-800 bg-white hover:bg-slate-50 border-l-4 ${bc} border-b last:border-b-0 border-slate-100 flex items-center justify-between tabular-nums`, "", { type: "button" });
+                        it.append(el("span", "", `${l} (${appState.rates[k]})`)); if (sInf.app === k) it.append(el("span", "text-blue-600 text-[11px]", "✓"));
+                        it.onclick = () => { openDD = null; updEnt({ overrideType: k }); }; menu.append(it);
+                    }); cw.append(menu);
+                }
+                form.append(cw);
+                if (sMet.valid) { const bar = el("div", "bg-white border border-slate-200/80 rounded-xl px-3 py-1.5 flex items-center justify-between text-xs font-bold tabular-nums"); bar.append(el("span", "text-slate-600", `活動時間: ${fmtM(sMet.workMin)}`), el("span", "text-emerald-600", sMet.amount.toLocaleString())); form.append(bar); }
+                mn.append(form);
+
+                const pk = `${appState.year}-${appState.month}`;
+                if (!appState.periodManuals) appState.periodManuals = {};
+                const curPm = appState.periodManuals[pk] || { days: 0, weekday: { w: 0, o: 0, n: 0 }, holiday: { w: 0, o: 0, n: 0 }, special: { w: 0, o: 0, n: 0 } };
+                const hasPm = (curPm.days || 0) > 0 || ["weekday", "holiday", "special"].some(k => curPm[k] && ((curPm[k].w || 0) > 0 || (curPm[k].o || 0) > 0 || (curPm[k].n || 0) > 0));
+
+                const mBox = el("section", "bg-slate-50/90 border border-slate-200/80 rounded-2xl p-3 flex flex-col gap-2");
+                const mHd = el("div", "flex items-center justify-between");
+                const mTog = el("button", "flex items-center gap-1.5 text-left text-xs font-bold text-slate-800", "", { type: "button" });
+                mTog.append(
+                    el("span", "", `${appState.month}月期 書類一括入力（時間手入力）`),
+                    hasPm ? el("span", "text-[10px] font-bold px-1.5 py-0.5 rounded bg-blue-100 text-blue-700", "入力あり") : el("span", ""),
+                    el("span", "text-slate-400 text-[10px]", openManual ? "▲" : "▼")
+                );
+                mTog.onclick = () => { openManual = !openManual; render(); };
+                mHd.append(mTog);
+                if (hasPm) {
+                    const mClr = el("button", "text-xs font-bold text-rose-500", "× 消去", { type: "button" });
+                    mClr.onclick = () => { delete appState.periodManuals[pk]; save(); render(); };
+                    mHd.append(mClr);
+                }
+                mBox.append(mHd);
+
+                if (openManual) {
+                    const updPm = (fn) => {
+                        const base = JSON.parse(JSON.stringify(appState.periodManuals[pk] || { days: 0, weekday: { w: 0, o: 0, n: 0 }, holiday: { w: 0, o: 0, n: 0 }, special: { w: 0, o: 0, n: 0 } }));
+                        fn(base);
+                        appState.periodManuals[pk] = base;
+                        save();
+                        render();
+                    };
+                    const dRow = el("div", "bg-white border border-slate-200 rounded-xl px-3 py-1.5 flex items-center justify-between text-xs");
+                    dRow.append(el("span", "font-bold text-slate-700", "出勤日数（日）"));
+                    const dInp = el("input", "w-16 text-right font-bold tabular-nums bg-slate-100 rounded px-2 py-1 outline-none", "", { type: "text", inputmode: "numeric", value: curPm.days || "", placeholder: "0" });
+                    dInp.onfocus = e => e.target.select();
+                    dInp.onchange = e => updPm(o => { o.days = Math.max(0, parseInt(e.target.value.replace(/\D/g, ""), 10) || 0); });
+                    dRow.append(dInp);
+                    mBox.append(dRow);
+
+                    const tbl = el("div", "bg-white border border-slate-200 rounded-xl p-2 flex flex-col gap-1.5");
+                    const th = el("div", "grid grid-cols-4 gap-1.5 text-[10px] font-bold text-slate-500 text-center");
+                    th.append(el("div", "text-left pl-1", "区分"), el("div", "", "通常勤務"), el("div", "", "時間外"), el("div", "", "夜間"));
+                    tbl.append(th);
+
+                    [["weekday", "平日", "text-slate-700"], ["holiday", "土日祝", "text-blue-600"], ["special", "特異日", "text-purple-600"]].forEach(([k, lbl, col]) => {
+                        const r = el("div", "grid grid-cols-4 gap-1.5 items-center");
+                        r.append(el("div", `text-[11px] font-bold pl-1 ${col}`, lbl));
+                        ["w", "o", "n"].forEach(f => {
+                            const valMin = (curPm[k] && curPm[k][f]) || 0;
+                            const inp = el("input", "w-full h-8 text-center text-xs font-bold tabular-nums bg-slate-50 border border-slate-200 rounded-lg outline-none focus:border-blue-400", "", {
+                                type: "text",
+                                placeholder: "0:00",
+                                value: valMin > 0 ? fmtM(valMin) : ""
+                            });
+                            inp.onfocus = e => e.target.select();
+                            inp.onkeydown = e => { if (e.key === "Enter") e.target.blur(); };
+                            inp.onblur = e => {
+                                const mins = parseDurMin(e.target.value);
+                                updPm(o => { if (!o[k]) o[k] = { w: 0, o: 0, n: 0 }; o[k][f] = mins; });
+                            };
+                            r.append(inp);
+                        });
+                        tbl.append(r);
+                    });
+                    tbl.append(el("div", "text-[10px] text-slate-400 text-right", "※「12:30」または分数「750」で入力可"));
+                    mBox.append(tbl);
+                }
+                mn.append(mBox);
+
+                const s3 = el("section", "grid grid-cols-3 gap-2");
+                [["調整前合計", sum.pre.toLocaleString(), "bg-slate-100/90 border-slate-200/80", "text-slate-500", "text-slate-900"], ["調整率・差引項目", "-" + sum.tDed.toLocaleString(), "bg-slate-100/90 border-slate-200/80", "text-rose-500", "text-rose-600"], ["調整後合計", sum.post.toLocaleString(), "bg-sky-50/90 border-sky-200/80", "text-blue-600", "text-blue-600"]].forEach(([t, v, bg, lc, vc]) => {
+                    const c = el("div", `${bg} border rounded-2xl py-2.5 px-2 text-center cursor-default`); c.append(el("div", `text-[10px] font-bold ${lc} mb-0.5`, t), el("div", `text-sm font-bold ${vc} tabular-nums`, v)); s3.append(c);
+                });
+                const ft = el("footer", "pt-1 px-1 flex items-center justify-between text-xs font-bold text-slate-600 tabular-nums"); ft.append(el("span", "", `出勤日数: ${sum.tc}日`), el("span", "", `出勤総時間: ${fmtM(sum.tw)}`));
+                const r2 = el("section", "grid grid-cols-2 gap-2");
+                [["累計調整前合計", rec.cumPre.toLocaleString()], ["累計調整後合計", rec.cumPost.toLocaleString()]].forEach(([l, v]) => {
+                    const c = el("div", "bg-slate-50/90 border border-slate-200/80 rounded-xl px-3 py-1.5 flex items-center justify-between text-[11px] font-bold tabular-nums");
+                    c.append(el("span", "text-slate-500", l), el("span", "text-slate-900", v));
+                    r2.append(c);
+                });
+                const r3 = el("section", "grid grid-cols-2 gap-2");
+                [["累計出勤日数", `${rec.cumDays}日`], ["累計出勤総時間", fmtM(rec.cumWork)]].forEach(([l, v]) => {
+                    const c = el("div", "bg-slate-50/90 border border-slate-200/80 rounded-xl px-3 py-1.5 flex items-center justify-between text-[11px] font-bold tabular-nums");
+                    c.append(el("span", "text-slate-500", l), el("span", "text-slate-900", v));
+                    r3.append(c);
+                });
+
+                const actRow = el("section", "grid grid-cols-3 gap-2 pt-0.5");
+                const saveBtn = el("button", "py-2 rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-xs font-bold shadow-sm transition-colors", "保存", { type: "button" });
+                saveBtn.onclick = triggerSave;
+
+                const restoreBtn = el("button", "py-2 rounded-xl bg-slate-100 hover:bg-slate-200 active:bg-slate-300 border border-slate-200 text-slate-800 text-xs font-bold transition-colors", "復元", { type: "button" });
+                restoreBtn.onclick = () => {
+                    restoreJsonInput = "";
+                    openConfirm({
+                        message: "復元しますか？",
+                        onConfirm: (jsonVal) => executeRestore(jsonVal),
+                        isDanger: false,
+                        withJsonInput: true,
+                        confirmLabel: "復元する"
+                    });
+                };
+
+                const resetBtn = el("button", "py-2 rounded-xl bg-red-600 hover:bg-red-700 active:bg-red-800 text-white text-xs font-bold shadow-sm transition-colors", "初期化", { type: "button" });
+                resetBtn.onclick = () => openConfirm({
+                    message: "本当に初期化しますか？",
+                    onConfirm: executeReset,
+                    isDanger: true,
+                    withJsonInput: false,
+                    confirmLabel: "初期化する"
+                });
+
+                actRow.append(saveBtn, restoreBtn, resetBtn);
+
+                mn.append(s3, ft, r2, r3, actRow);
+                root.append(mn);
+
+                if (confirmModal) {
+                    const ov = el("div", "fixed inset-0 z-50 bg-slate-900/50 flex items-center justify-center p-4");
+                    const dlg = el("div", "w-full max-w-xs bg-white rounded-2xl shadow-xl border border-slate-200 p-4 flex flex-col gap-3");
+                    dlg.append(el("div", "text-sm font-bold text-slate-900 text-center", confirmModal.message));
+
+                    let jsonArea = null;
+                    if (confirmModal.withJsonInput) {
+                        const lbl = el("label", "block text-[11px] font-bold text-slate-600", "保存したJSONデータを貼り付け");
+                        jsonArea = el("textarea", "w-full h-28 text-[11px] font-mono bg-slate-50 border border-slate-200 rounded-xl p-2 outline-none focus:border-blue-400 resize-none", "", {
+                            placeholder: "ここにJSONデータをコピペしてください"
+                        });
+                        jsonArea.value = restoreJsonInput;
+                        jsonArea.oninput = e => { restoreJsonInput = e.target.value; };
+                        dlg.append(lbl, jsonArea);
+                    }
+
+                    const btnG = el("div", "grid grid-cols-2 gap-2");
+                    const cancelB = el("button", "py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold", "キャンセル", { type: "button" });
+                    cancelB.onclick = closeConfirm;
+                    const okCls = confirmModal.isDanger
+                        ? "py-2 rounded-xl bg-red-600 hover:bg-red-700 text-white text-xs font-bold"
+                        : "py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold";
+                    const okB = el("button", okCls, confirmModal.confirmLabel, { type: "button" });
+                    okB.onclick = () => {
+                        const fn = confirmModal.onConfirm;
+                        const jsonVal = jsonArea ? jsonArea.value : restoreJsonInput;
+                        closeConfirm();
+                        if (typeof fn === "function") fn(jsonVal);
+                    };
+                    btnG.append(cancelB, okB);
+                    dlg.append(btnG);
+                    ov.append(dlg);
+                    root.append(ov);
+                }
+            }
+
+            render();
+        </script>
+    </body>
+</html>
