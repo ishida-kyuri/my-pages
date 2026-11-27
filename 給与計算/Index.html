@@ -37,23 +37,10 @@
             const tD = now.getDate();
             const todayIso = iso(tY, tM, tD);
 
-            function getInitialPeriod(closingDay = 10){
-                const cd = normalizeClosingDay(closingDay);
-                const dim = new Date(tY, tM, 0).getDate();
-                const effCd = cd === 0 ? dim : Math.min(cd, dim);
-                let m = tD >= effCd + 1 ? tM + 1 : tM;
-                let y = tY;
-                if (m > 12) {
-                    m = 1;
-                    y += 1;
-                }
-                return { year: y, month: m };
-            }
-
             function normalizeClosingDay(v){
-                if (v === 0 || v === "0" || v === "end") return 0;
+                if (v === 0 || v === "0" || v === "end") return 31;
                 const n = parseInt(v, 10);
-                if (isNaN(n) || n < 1 || n > 28) return 10;
+                if (isNaN(n) || n < 1 || n > 31) return 10;
                 return n;
             }
 
@@ -62,6 +49,19 @@
                 if ([1, 5, 10, 15, 30].includes(n)) return n;
                 if (!isNaN(n) && n >= 1 && n <= 60) return n;
                 return 10;
+            }
+
+            function getInitialPeriod(closingDay = 10){
+                const cd = normalizeClosingDay(closingDay);
+                const dim = new Date(tY, tM, 0).getDate();
+                const effCd = Math.min(cd, dim);
+                let m = tD >= effCd + 1 ? tM + 1 : tM;
+                let y = tY;
+                if (m > 12) {
+                    m = 1;
+                    y += 1;
+                }
+                return { year: y, month: m };
             }
 
             const DEF = {
@@ -151,11 +151,11 @@
                 const py=m===1?y-1:y,pm=m===1?12:m-1;
                 const prevDim=new Date(py,pm,0).getDate();
                 const curDim=new Date(y,m,0).getDate();
-                const endD=cd===0?curDim:Math.min(cd,curDim);
-                const startD=cd===0?1:Math.min(cd+1,prevDim);
+                const endD=Math.min(cd,curDim);
+                const prevEffCd=Math.min(cd,prevDim);
                 const a=[];
-                if(cd!==0){
-                    for(let d=startD;d<=prevDim;d++)a.push({y:py,m:pm,d,iso:iso(py,pm,d)});
+                if(prevEffCd<prevDim){
+                    for(let d=prevEffCd+1;d<=prevDim;d++)a.push({y:py,m:pm,d,iso:iso(py,pm,d)});
                 }
                 for(let d=1;d<=endD;d++)a.push({y,m,d,iso:iso(y,m,d)});
                 return a;
@@ -165,7 +165,6 @@
                 const p=dateIso.split("-").map(Number);
                 const dy=p.at(0),dm=p.at(1),dd=p.at(2);
                 const cd=normalizeClosingDay(closingDay);
-                if(cd===0)return `${dy}-${dm}`;
                 const dim=new Date(dy,dm,0).getDate();
                 const effCd=Math.min(cd,dim);
                 let py=dy,pm=dm;
@@ -450,6 +449,24 @@
                 body.append(colH,colM);wrap.append(hd,body);return wrap;
             }
 
+            function buildCompactDD(items, curVal, onSelect){
+                const wrap = el("div", "absolute top-full left-0 right-0 w-full mt-1 z-40 bg-white border border-slate-200 rounded-xl shadow-lg overflow-hidden box-border");
+                const list = el("div", "max-h-36 overflow-y-auto slim-scroll");
+                items.forEach(({ val, label }) => {
+                    const active = val === curVal;
+                    const itemBtn = el("button", `w-full px-3 py-1.5 text-left text-xs font-bold tabular-nums flex items-center justify-between border-b last:border-b-0 border-slate-100 ${active ? "bg-blue-600 text-white" : "text-slate-700 hover:bg-slate-100"}`, "", { type: "button" });
+                    itemBtn.append(el("span", "", label));
+                    if (active) itemBtn.append(el("span", "text-[11px]", "✓"));
+                    itemBtn.onclick = () => {
+                        openDD = null;
+                        onSelect(val);
+                    };
+                    list.append(itemBtn);
+                });
+                wrap.append(list);
+                return wrap;
+            }
+
             function buildPanel(sum){
                 const rec = calcRecords(appState);
                 const box=el("div","flex flex-col gap-2.5"),top=el("div","flex items-center justify-between");
@@ -468,41 +485,38 @@
                     ruleB.append(el("div", "text-xs font-bold text-slate-700", "締め日・時間刻み設定"));
                     const ruleG = el("div", "grid grid-cols-2 gap-2");
 
-                    const cdWrap = el("div", "bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 flex flex-col gap-1");
-                    cdWrap.append(el("label", "text-[10px] font-bold text-slate-500", "締め日"));
-                    const cdSel = el("select", "w-full text-xs font-bold text-slate-800 bg-transparent outline-none tabular-nums");
-                    const cdChoices = [10, 15, 20, 25, 0, ...Array.from({ length: 28 }, (_, i) => i + 1).filter(d => ![10, 15, 20, 25].includes(d))];
                     const curCd = normalizeClosingDay(appState.closingDay);
-                    cdChoices.forEach(d => {
-                        const label = d === 0 ? "末日締め" : `${d}日締め`;
-                        const opt = el("option", "", label, { value: String(d) });
-                        if (d === curCd) opt.selected = true;
-                        cdSel.append(opt);
-                    });
-                    cdSel.onchange = e => {
-                        appState.closingDay = normalizeClosingDay(e.target.value);
-                        fixSel();
-                        save();
-                        render();
-                    };
-                    cdWrap.append(cdSel);
+                    const cdWrap = el("div", "relative w-full", "", { "data-dd": "1" });
+                    cdWrap.append(el("label", "block text-[10px] font-bold text-slate-500 mb-1", "締め日"));
+                    const cdBtn = el("button", "w-full h-9 bg-white border border-slate-200 rounded-xl px-3 flex items-center justify-between text-xs font-bold text-slate-800 tabular-nums", "", { type: "button" });
+                    cdBtn.append(el("span", "", `${curCd}日締め`), el("span", "text-slate-400 text-[10px]", openDD === "closingDay" ? "▲" : "▼"));
+                    cdBtn.onclick = () => { openDD = openDD === "closingDay" ? null : "closingDay"; render(); };
+                    cdWrap.append(cdBtn);
+                    if (openDD === "closingDay") {
+                        const cdItems = Array.from({ length: 31 }, (_, i) => ({ val: i + 1, label: `${i + 1}日締め` }));
+                        cdWrap.append(buildCompactDD(cdItems, curCd, v => {
+                            appState.closingDay = normalizeClosingDay(v);
+                            fixSel();
+                            save();
+                            render();
+                        }));
+                    }
 
-                    const stWrap = el("div", "bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 flex flex-col gap-1");
-                    stWrap.append(el("label", "text-[10px] font-bold text-slate-500", "時間刻み"));
-                    const stSel = el("select", "w-full text-xs font-bold text-slate-800 bg-transparent outline-none tabular-nums");
-                    const stChoices = [1, 5, 10, 15, 30];
                     const curStep = normalizeStepMin(appState.stepMin);
-                    stChoices.forEach(m => {
-                        const opt = el("option", "", `${m}分刻み`, { value: String(m) });
-                        if (m === curStep) opt.selected = true;
-                        stSel.append(opt);
-                    });
-                    stSel.onchange = e => {
-                        appState.stepMin = normalizeStepMin(e.target.value);
-                        save();
-                        render();
-                    };
-                    stWrap.append(stSel);
+                    const stWrap = el("div", "relative w-full", "", { "data-dd": "1" });
+                    stWrap.append(el("label", "block text-[10px] font-bold text-slate-500 mb-1", "時間刻み"));
+                    const stBtn = el("button", "w-full h-9 bg-white border border-slate-200 rounded-xl px-3 flex items-center justify-between text-xs font-bold text-slate-800 tabular-nums", "", { type: "button" });
+                    stBtn.append(el("span", "", `${curStep}分刻み`), el("span", "text-slate-400 text-[10px]", openDD === "stepMin" ? "▲" : "▼"));
+                    stBtn.onclick = () => { openDD = openDD === "stepMin" ? null : "stepMin"; render(); };
+                    stWrap.append(stBtn);
+                    if (openDD === "stepMin") {
+                        const stItems = [1, 5, 10, 15, 30].map(m => ({ val: m, label: `${m}分刻み` }));
+                        stWrap.append(buildCompactDD(stItems, curStep, v => {
+                            appState.stepMin = normalizeStepMin(v);
+                            save();
+                            render();
+                        }));
+                    }
 
                     ruleG.append(cdWrap, stWrap);
                     ruleB.append(ruleG);
